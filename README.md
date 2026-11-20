@@ -292,6 +292,7 @@ Pi has no `PreToolUse` hook, so `graphify pi guard install` registers a native P
 | `pascal` | Pascal / Delphi `.pas`/`.dpr`/`.dpk`/`.inc` AST extraction (more accurate `calls`/`inherits` edges; falls back to a regex extractor when absent) | `uv tool install "graphifyy[pascal]"` |
 | `ocaml` | OCaml `.ml`/`.mli` AST extraction | `uv tool install "graphifyy[ocaml]"` |
 | `commonlisp` | Common Lisp `.lisp`/`.cl`/`.lsp`/`.asd` AST extraction | `uv tool install "graphifyy[commonlisp]"` |
+| `cfml` | CFML (ColdFusion / Lucee) `.cfc`/`.cfm` AST extraction (components, functions, `extends`/`implements`, `createObject`/`new`/`<cfinvoke>`, includes, WireBox `inject`/`getInstance`) | `uv tool install "graphifyy[cfml]"` |
 | `robot` | Robot Framework `.robot`/`.resource` extraction (suites, test cases, keywords, keyword-call and resource/library import edges) | `uv tool install "graphifyy[robot]"` |
 | `chinese` | Chinese query segmentation (jieba) | `uv tool install "graphifyy[chinese]"` |
 | `all` | Everything above | `uv tool install "graphifyy[all]"` |

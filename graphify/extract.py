@@ -59,6 +59,7 @@ from graphify.extractors.base import (  # noqa: F401
 from graphify.extractors.apex import extract_apex  # noqa: F401
 from graphify.extractors.bash import extract_bash  # noqa: F401
 from graphify.extractors.blade import extract_blade  # noqa: F401
+from graphify.extractors.cfml import extract_cfml  # noqa: F401
 from graphify.extractors.cobol import extract_cobol  # noqa: F401
 from graphify.extractors.csharp import (
     CsharpNameResolver,
@@ -4636,6 +4637,7 @@ _LANG_FAMILY_BY_EXT: dict[str, str] = {
     ".cbl": "cobol", ".cob": "cobol", ".cobol": "cobol", ".cpy": "cobol",
     ".r": "r",
     ".sol": "solidity",
+    ".cfc": "cfml", ".cfm": "cfml",
     ".erl": "erlang", ".hrl": "erlang", ".escript": "erlang",
     ".rb": "ruby", ".rake": "ruby",
     ".php": "php", ".phtml": "php", ".php3": "php", ".php4": "php",
@@ -11213,6 +11215,8 @@ _DISPATCH: dict[str, Any] = {
     ".resource": extract_robot,
     ".cls": extract_apex,
     ".trigger": extract_apex,
+    ".cfc": extract_cfml,
+    ".cfm": extract_cfml,
 }
 
 
@@ -11224,6 +11228,8 @@ _EXTRA_FOR_EXTENSION = {
     ".vb": "vbnet",
     ".r": "r",
     ".sol": "solidity",
+    ".cfc": "cfml",
+    ".cfm": "cfml",
     ".erl": "erlang",
     ".hrl": "erlang",
     ".escript": "erlang",

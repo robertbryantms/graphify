@@ -569,6 +569,7 @@ _EDGE_LANG_FAMILY: dict[str, str] = {
     ".luau": "lua",
     ".cbl": "cobol", ".cob": "cobol", ".cobol": "cobol", ".cpy": "cobol",
     ".r": "r", ".sol": "solidity",
+    ".cfc": "cfml", ".cfm": "cfml",
     ".erl": "erlang", ".hrl": "erlang", ".escript": "erlang",
     ".zig": "zig", ".ex": "elixir", ".exs": "elixir", ".jl": "julia",
     ".dart": "dart", ".sql": "sql",
