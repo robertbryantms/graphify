@@ -28,7 +28,16 @@ need a server mapping, a web-root path or the ColdBox/WireBox registry are kept
 as unresolved ``INFERRED`` references for a later cross-file pass: a sourceless
 stub node (kind ``reference``) labelled with the raw name, and an edge whose
 ``context`` is ``cfml_component:<name>``, ``cfml_template:<name>`` or
-``cfml_wirebox:<name>``. Nothing here reads server configuration.
+``cfml_wirebox:<name>``. ``resolve_cfml_references`` is that pass.
+
+Server configuration is never read. The only mappings used are the ones a project
+declares statically in its own ``Application.cfc`` / ``Application.cfm``: a
+``this.mappings["/name"]`` assignment whose value is ``expandPath("literal")``,
+``this.<var>`` or ``this.<var> & "literal"``, where ``<var>`` was itself assigned
+one of those or ``getDirectoryFromPath(getCurrentTemplatePath())``. They are
+recorded on the file node (``metadata.mappings``, paths relative to that file).
+Absolute paths and computed values are ignored: they are machine-specific or
+unknowable without running the application.
 
 Known gaps (documented, not guessed): ``<cfinterface>`` is not supported by the
 grammar, a malformed tag is skipped rather than repaired, and dynamic names
@@ -37,13 +46,17 @@ grammar, a malformed tag is skipped rather than repaired, and dynamic names
 from __future__ import annotations
 
 import os
+import posixpath
 import re
-from pathlib import Path
+from pathlib import Path, PurePath
 
 from graphify.extractors.base import _make_id, _read_source_bytes, _read_text
 from graphify.extractors.engine import _get_parser
 
 _TAG_NAME_RE = re.compile(r"<cf(\w+)", re.IGNORECASE)
+_APPLICATION_NAMES = frozenset({"application.cfc", "application.cfm"})
+_THIS_VAR_RE = re.compile(r"this\s*\.\s*(\w+)", re.IGNORECASE)
+_THIS_MAPPING_RE = re.compile(r"""this\s*\.\s*mappings\s*\[\s*(["'])(.*?)\1\s*\]""", re.IGNORECASE | re.DOTALL)
 _START_TAG_TYPES = frozenset({"cf_start_tag", "cf_selfclose_tag", "cf_start_tag_with_selfclose"})
 
 
@@ -125,6 +138,9 @@ class _Extraction:
         self.functions: dict[str, str] = {}
         self.pending_calls: list[tuple[str, str, int]] = []
         self.cache = _Cache()
+        self.is_application = path.name.lower() in _APPLICATION_NAMES
+        self.path_vars: dict[str, str] = {}
+        self.mappings: list[dict[str, str]] = []
         self.owner_nid = self.file_nid
         self.add_node(self.file_nid, path.name, 1, "file")
         if self.is_component:
@@ -236,7 +252,65 @@ class _Extraction:
             tgt = self.functions.get(name.lower())
             if tgt:
                 self.add_edge(src, tgt, "calls", line)
+        if self.mappings:
+            self.nodes[0]["metadata"]["mappings"] = self.mappings
         return {"nodes": self.nodes, "edges": self.edges}
+
+
+# -- static mappings (Application.cfc / Application.cfm) ------------------------
+def _relative_literal(value: str) -> str | None:
+    """A normalised relative path, or None for anything absolute, drive-qualified or computed."""
+    value = value.strip().replace("\\", "/")
+    if not value or "#" in value or value.startswith("/") or re.match(r"^[A-Za-z]:", value):
+        return None
+    normal = posixpath.normpath(value)
+    return None if normal.startswith("/") else normal
+
+
+def _static_path(ex: _Extraction, node, source: bytes) -> str | None:
+    """The directory a mapping value denotes, relative to the Application file, or None."""
+    kind = node.type
+    text = _read_text(node, source)
+    if kind == "call_expression":
+        name, receiver = _callee(node, source)
+        if receiver is not None or not name:
+            return None
+        if name.lower() == "expandpath":
+            args = _string_args(node, source)
+            return _relative_literal(args[0]) if len(args) == 1 and args[0] else None
+        if name.lower() == "getdirectoryfrompath" and "getcurrenttemplatepath" in text.lower():
+            return "."
+        return None
+    if kind == "member_expression":
+        match = _THIS_VAR_RE.fullmatch(text.strip())
+        return ex.path_vars.get(match.group(1).lower()) if match else None
+    if kind == "binary_expression" and len(node.children) == 3 and node.children[1].type == "&":
+        left = _static_path(ex, node.children[0], source)
+        right = node.children[2]
+        if left is None or right.type != "string":
+            return None
+        suffix = _relative_literal(_unquote(_read_text(right, source)).lstrip("/"))
+        return posixpath.normpath(posixpath.join(left, suffix)) if suffix else None
+    return None
+
+
+def _handle_assignment(ex: _Extraction, node, source: bytes) -> None:
+    """Record ``this.<var> = <path>`` and ``this.mappings["/name"] = <path>`` in an Application file."""
+    if len(node.children) < 3:
+        return
+    target = _read_text(node.children[0], source).strip()
+    value = _static_path(ex, node.children[-1], source)
+    if value is None:
+        return
+    mapping = _THIS_MAPPING_RE.fullmatch(target)
+    if mapping:
+        name = mapping.group(2).strip().strip("/")
+        if name and not any(m["name"] == name for m in ex.mappings):
+            ex.mappings.append({"name": name, "path": value})
+        return
+    variable = _THIS_VAR_RE.fullmatch(target)
+    if variable:
+        ex.path_vars[variable.group(1).lower()] = value
 
 
 # -- tag grammar ---------------------------------------------------------------
@@ -345,6 +419,8 @@ def _walk_tags(ex: _Extraction, node, source: bytes, fn_nid: str | None, line_of
         _handle_call(ex, node, source, owner, line)
     elif kind == "new_expression":
         _handle_new(ex, node, source, owner, line)
+    elif kind == "assignment_expression" and ex.is_application:
+        _handle_assignment(ex, node, source)
     for child in node.children:
         _walk_tags(ex, child, source, fn_nid, line_offset)
 
@@ -387,8 +463,178 @@ def _walk_script(ex: _Extraction, node, source: bytes, fn_nid: str | None, line_
         _handle_call(ex, node, source, owner, line)
     elif kind == "new_expression":
         _handle_new(ex, node, source, owner, line)
+    elif kind == "assignment_expression" and ex.is_application:
+        _handle_assignment(ex, node, source)
     for child in node.children:
         _walk_script(ex, child, source, fn_nid, line_offset)
+
+
+# -- cross-file resolution -----------------------------------------------------
+_CONTEXT_PREFIXES = ("cfml_component:", "cfml_template:", "cfml_wirebox:")
+
+
+def _path_key(path: str) -> str:
+    return PurePath(path).as_posix().lower()
+
+
+def _ancestors(directory: str) -> list[str]:
+    found: list[str] = []
+    current = directory
+    while current and current not in found:
+        found.append(current)
+        parent = posixpath.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    return found
+
+
+def resolve_cfml_references(
+    _per_file: list[dict], all_nodes: list[dict], all_edges: list[dict]
+) -> None:
+    """Bind the references the per-file extractor could not place to files in the corpus.
+
+    Targets are tried in this order and the first stage that yields a file wins:
+
+    1. a mapping declared in the nearest enclosing ``Application.cfc`` / ``.cfm``
+       (the nearest declaration of a name shadows an outer one);
+    2. the directory of each enclosing ``Application`` file, nearest first, which
+       is where CFML looks for dotted names and web-root paths;
+    3. a path suffix that matches exactly one file in the corpus.
+
+    WireBox ids (``name`` or ``name@module``) match a component by file name:
+    inside the named module's directory when one is given, otherwise the single
+    match within the enclosing application. Anything ambiguous, absent or
+    produced by a ``dsl:`` prefix stays an unresolved stub: a wrong edge is worse
+    than a missing one.
+    """
+    pending = [
+        e for e in all_edges
+        if isinstance(e.get("context"), str) and e["context"].startswith(_CONTEXT_PREFIXES)
+    ]
+    if not pending:
+        return
+
+    components: dict[str, str] = {}      # path without extension -> component node id
+    files: dict[str, str] = {}           # full path -> file node id
+    app_mappings: dict[str, list[tuple[str, str]]] = {}   # Application dir -> [(name, dir)]
+    for node in all_nodes:
+        meta = node.get("metadata")
+        source = node.get("source_file")
+        if not isinstance(meta, dict) or meta.get("language") != "cfml" or not source:
+            continue
+        key = _path_key(str(source))
+        if meta.get("kind") == "component":
+            components[posixpath.splitext(key)[0]] = node["id"]
+        elif meta.get("kind") == "file":
+            files[key] = node["id"]
+            if posixpath.basename(key) in _APPLICATION_NAMES:
+                base = posixpath.dirname(key)
+                app_mappings[base] = [
+                    (str(m["name"]).strip("/").lower(),
+                     posixpath.normpath(posixpath.join(base, str(m["path"]).lower())))
+                    for m in meta.get("mappings") or []
+                    if isinstance(m, dict) and m.get("name") and m.get("path")
+                ]
+    component_keys_by_name: dict[str, list[str]] = {}
+    for key in components:
+        component_keys_by_name.setdefault(posixpath.basename(key), []).append(key)
+    file_keys_by_name: dict[str, list[str]] = {}
+    for key in files:
+        file_keys_by_name.setdefault(posixpath.basename(key), []).append(key)
+
+    def visible_mappings(directory: str) -> dict[str, str]:
+        found: dict[str, str] = {}
+        for ancestor in _ancestors(directory):
+            for name, target in app_mappings.get(ancestor, ()):
+                found.setdefault(name, target)
+        return found
+
+    def application_roots(directory: str) -> list[str]:
+        return [d for d in _ancestors(directory) if d in app_mappings]
+
+    def find(index: dict[str, str], keys_by_name: dict[str, list[str]], directory: str,
+             parts: list[str]) -> str | None:
+        relative = "/".join(parts)
+        mappings = visible_mappings(directory)
+        if len(parts) > 1 and parts[0] in mappings:
+            hit = index.get(posixpath.normpath(mappings[parts[0]] + "/" + "/".join(parts[1:])))
+            if hit:
+                return hit
+        for root in application_roots(directory):
+            hit = index.get(root + "/" + relative)
+            if hit:
+                return hit
+        suffix = "/" + relative
+        hits = [
+            index[k] for k in keys_by_name.get(parts[-1], ())
+            if k.endswith(suffix) or k == relative
+        ]
+        return hits[0] if len(hits) == 1 else None
+
+    def find_component(directory: str, name: str) -> str | None:
+        parts = name.replace("\\", ".").replace("/", ".").lower().split(".")
+        if not all(parts):
+            return None
+        return find(components, component_keys_by_name, directory, parts)
+
+    def find_template(directory: str, name: str) -> str | None:
+        parts = name.replace("\\", "/").lower().strip("/").split("/")
+        if not all(parts):
+            return None
+        # Templates are keyed with their extension, the last path part carries it too.
+        return find(files, file_keys_by_name, directory, parts)
+
+    def find_wirebox(directory: str, raw: str) -> str | None:
+        name, _, module = raw.partition("@")
+        name, module = name.strip(), module.strip().lower()
+        if name.lower().startswith("model:"):
+            name = name[6:]
+        if not name or ":" in name:  # id:, provider:, logbox: and the other DSL prefixes
+            return None
+        if "." in name:
+            return find_component(directory, name)
+        candidates = component_keys_by_name.get(name.lower(), [])
+        if module:
+            marker = "/" + module + "/"
+            candidates = [k for k in candidates if marker in k]
+        else:
+            nearest: list[str] = []
+            for root in application_roots(directory):
+                nearest = [k for k in candidates if k.startswith(root + "/")]
+                if nearest:
+                    break
+            candidates = nearest or candidates
+            if len(candidates) > 1:
+                candidates = [k for k in candidates if "/models/" in k or "/model/" in k] or candidates
+        return components[candidates[0]] if len(candidates) == 1 else None
+
+    existing = {(e.get("source"), e.get("target"), e.get("relation")) for e in all_edges}
+    rewired: set[str] = set()
+    duplicates: set[int] = set()
+    for edge in pending:
+        kind, _, raw = edge["context"][len("cfml_"):].partition(":")
+        directory = posixpath.dirname(_path_key(str(edge.get("source_file", ""))))
+        if kind == "component":
+            target = find_component(directory, raw)
+        elif kind == "template" and raw.startswith("/"):
+            target = find_template(directory, raw)
+        elif kind == "wirebox":
+            target = find_wirebox(directory, raw)
+        else:
+            target = None
+        if not target or target == edge.get("source"):
+            continue
+        key = (edge.get("source"), target, edge.get("relation"))
+        if key in existing:
+            duplicates.add(id(edge))
+        existing.add(key)
+        rewired.add(str(edge["target"]))
+        edge["target"] = target
+    if duplicates:
+        all_edges[:] = [e for e in all_edges if id(e) not in duplicates]
+    referenced = {x for e in all_edges for x in (e.get("source"), e.get("target"))}
+    all_nodes[:] = [n for n in all_nodes if n.get("id") not in rewired or n.get("id") in referenced]
 
 
 # -- entry point ---------------------------------------------------------------

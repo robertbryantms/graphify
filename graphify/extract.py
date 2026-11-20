@@ -59,7 +59,10 @@ from graphify.extractors.base import (  # noqa: F401
 from graphify.extractors.apex import extract_apex  # noqa: F401
 from graphify.extractors.bash import extract_bash  # noqa: F401
 from graphify.extractors.blade import extract_blade  # noqa: F401
-from graphify.extractors.cfml import extract_cfml  # noqa: F401
+from graphify.extractors.cfml import (  # noqa: F401
+    extract_cfml,
+    resolve_cfml_references,
+)
 from graphify.extractors.cobol import extract_cobol  # noqa: F401
 from graphify.extractors.csharp import (
     CsharpNameResolver,
@@ -9930,6 +9933,9 @@ register_language_resolver(
     LanguageResolver(
         "solidity_inherited_calls", frozenset({".sol"}), resolve_solidity_inherited_calls
     )
+)
+register_language_resolver(
+    LanguageResolver("cfml_references", frozenset({".cfc", ".cfm"}), resolve_cfml_references)
 )
 register_language_resolver(
     LanguageResolver(
